@@ -7,9 +7,10 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, AsyncGenerator, Literal
 
+import google.generativeai as genai
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -17,7 +18,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-load_dotenv()
+# Load env vars from backend/.env and root .env
+# load_dotenv() does not override existing env vars, so we load specific paths
+backend_env = os.path.join(os.path.dirname(__file__), "..", ".env")
+root_env = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+load_dotenv(backend_env)
+load_dotenv(root_env)
 
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data.db"))
 
@@ -28,6 +34,10 @@ FRONTEND_ORIGIN_2 = os.getenv("FRONTEND_ORIGIN_2", "http://localhost:3000")
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
 
 def utc_now_iso() -> str:
@@ -169,16 +179,19 @@ class SearchResult:
     published_at: str | None = None
 
 
-async def tavily_search(query: str) -> list[SearchResult]:
+async def tavily_search(query: str) -> dict[str, Any]:
     if not TAVILY_API_KEY:
-        return [
-            SearchResult(
-                title="(Mock) Tavily disabled",
-                snippet=f"No TAVILY_API_KEY set. Query: {query}",
-                url="https://tavily.com",
-                published_at=None,
-            )
-        ]
+        return {
+            "results": [
+                SearchResult(
+                    title="(Mock) Tavily disabled",
+                    snippet=f"No TAVILY_API_KEY set. Query: {query}",
+                    url="https://tavily.com",
+                    published_at=None,
+                )
+            ],
+            "images": [],
+        }
 
     url = "https://api.tavily.com/search"
     payload = {
@@ -187,6 +200,7 @@ async def tavily_search(query: str) -> list[SearchResult]:
         "search_depth": "basic",
         "include_answer": False,
         "include_raw_content": False,
+        "include_images": True,
         "max_results": 6,
     }
     timeout = httpx.Timeout(12.0)
@@ -205,65 +219,228 @@ async def tavily_search(query: str) -> list[SearchResult]:
                 published_at=r.get("published_date"),
             )
         )
-    return out
+    return {"results": out, "images": data.get("images", [])}
 
 
-async def alphavantage_overview(symbol: str) -> dict[str, Any]:
-    if not ALPHAVANTAGE_API_KEY:
-        return {
-            "mock": True,
-            "symbol": symbol,
-            "note": "No ALPHAVANTAGE_API_KEY set; returning mock overview.",
-            "market_cap": None,
-            "pe_ratio": None,
-            "profit_margin": None,
-        }
-
-    # Alpha Vantage is rate-limited; keep calls minimal.
-    base = "https://www.alphavantage.co/query"
-    params = {"function": "OVERVIEW", "symbol": symbol, "apikey": ALPHAVANTAGE_API_KEY}
-    timeout = httpx.Timeout(12.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(base, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-    if "Note" in data:
-        # Rate limit message.
-        return {"symbol": symbol, "rate_limited": True, "note": data["Note"]}
-
+def get_mock_financial_data(symbol: str, note: str) -> dict[str, Any]:
+    mock_history = []
+    # Generate 30 days of mock data ending today
+    today = datetime.now(timezone.utc)
+    for i in range(30):
+        date = (today - timedelta(days=30-i)).strftime("%Y-%m-%d")
+        mock_history.append({
+            "date": date,
+            "price": 150.0 + (i * 0.5)
+        })
     return {
+        "mock": True,
         "symbol": symbol,
-        "name": data.get("Name"),
-        "description": data.get("Description"),
-        "sector": data.get("Sector"),
-        "industry": data.get("Industry"),
-        "market_cap": data.get("MarketCapitalization"),
-        "pe_ratio": data.get("PERatio"),
-        "profit_margin": data.get("ProfitMargin"),
-        "52w_high": data.get("52WeekHigh"),
-        "52w_low": data.get("52WeekLow"),
-        "currency": data.get("Currency"),
+        "note": note,
+        "market_cap": "2.5T",
+        "pe_ratio": "30.5",
+        "profit_margin": "0.25",
+        "history": mock_history
     }
 
 
-def decompose_prompt(prompt: str) -> dict[str, Any]:
-    # Lightweight heuristic decomposition (fast, deterministic). You can swap for an LLM planner later.
-    # Extract a competitor name as the last capitalized token group if present.
-    competitor = None
-    tokens = prompt.replace("\n", " ").split(" ")
-    caps = [t.strip(" ,.!?\"'") for t in tokens if t[:1].isupper()]
-    if caps:
-        competitor = " ".join(caps[-2:]) if len(caps) >= 2 else caps[-1]
-    competitor = competitor or "Competitor X"
+async def get_yahoo_history(symbol: str) -> list[dict[str, Any]] | None:
+    # Unofficial Yahoo Finance API - use with caution, may be rate limited or blocked
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1mo&interval=1d"
+    timeout = httpx.Timeout(10.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            result = data.get("chart", {}).get("result", [])
+            if not result:
+                return None
+            
+            quote = result[0]
+            timestamps = quote.get("timestamp", [])
+            indicators = quote.get("indicators", {}).get("quote", [])
+            
+            if not timestamps or not indicators:
+                return None
+                
+            closes = indicators[0].get("close", [])
+            
+            history = []
+            for ts, price in zip(timestamps, closes):
+                if price is not None:
+                    dt = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+                    history.append({"date": dt, "price": float(price)})
+            
+            return history
+    except Exception as e:
+        print(f"Yahoo Finance history failed: {e}")
+        return None
 
-    # Finance symbol heuristic: if user includes ticker like (AAPL) use it.
+
+async def alphavantage_overview(symbol: str) -> dict[str, Any]:
+    # 1. Try AlphaVantage if Key is present
+    if ALPHAVANTAGE_API_KEY and symbol != "UNKNOWN":
+        base = "https://www.alphavantage.co/query"
+        timeout = httpx.Timeout(15.0)
+        
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                # 1. Overview
+                params_ov = {"function": "OVERVIEW", "symbol": symbol, "apikey": ALPHAVANTAGE_API_KEY}
+                resp_ov = await client.get(base, params=params_ov)
+                resp_ov.raise_for_status()
+                data_ov = resp_ov.json()
+
+                # 2. Daily Series
+                params_ts = {"function": "TIME_SERIES_DAILY", "symbol": symbol, "apikey": ALPHAVANTAGE_API_KEY}
+                resp_ts = await client.get(base, params=params_ts)
+                resp_ts.raise_for_status()
+                data_ts = resp_ts.json()
+
+            # Check for API errors / Rate limits
+            if "Note" in data_ov or "Note" in data_ts:
+                print("AlphaVantage rate limit reached.")
+                # Fallthrough to backup
+            elif not data_ov or ("Symbol" not in data_ov and "Name" not in data_ov):
+                print("Symbol not found in AlphaVantage.")
+                # Fallthrough to backup
+            else:
+                # Parse history
+                history = []
+                ts_data = data_ts.get("Time Series (Daily)", {})
+                # Get last 30 days
+                sorted_dates = sorted(ts_data.keys(), reverse=True)[:30]
+                for d in sorted_dates:
+                    # "4. close" is usually the closing price
+                    close_price = ts_data[d].get("4. close")
+                    if close_price:
+                        history.append({"date": d, "price": float(close_price)})
+                
+                # Sort back to ascending for the graph
+                history.sort(key=lambda x: x["date"])
+
+                return {
+                    "symbol": symbol,
+                    "name": data_ov.get("Name"),
+                    "description": data_ov.get("Description"),
+                    "sector": data_ov.get("Sector"),
+                    "industry": data_ov.get("Industry"),
+                    "market_cap": data_ov.get("MarketCapitalization"),
+                    "pe_ratio": data_ov.get("PERatio"),
+                    "profit_margin": data_ov.get("ProfitMargin"),
+                    "52w_high": data_ov.get("52WeekHigh"),
+                    "52w_low": data_ov.get("52WeekLow"),
+                    "currency": data_ov.get("Currency"),
+                    "history": history
+                }
+
+        except Exception as e:
+            print(f"AlphaVantage API failed: {e}")
+            # Fallthrough to backup
+
+    # 2. Backup: Yahoo Finance for History + Mock Overview
+    if symbol != "UNKNOWN":
+        print(f"Attempting Yahoo Finance fallback for {symbol}")
+        yh = await get_yahoo_history(symbol)
+        if yh:
+            data = get_mock_financial_data(symbol, "Market data from Yahoo Finance (Overview mocked)")
+            data["history"] = yh
+            data["mock"] = False # Real history
+            return data
+
+    # 3. Final Fallback: Pure Mock
+    note = "No ALPHAVANTAGE_API_KEY set" if not ALPHAVANTAGE_API_KEY else "Data source unavailable"
+    return get_mock_financial_data(symbol, f"{note}; returning mock overview.")
+
+
+def decompose_prompt(prompt: str) -> dict[str, Any]:
+    # 1. Extract symbol using LLM
     symbol = None
-    if "(" in prompt and ")" in prompt:
-        inside = prompt.split("(", 1)[1].split(")", 1)[0].strip().upper()
-        if 1 <= len(inside) <= 6 and inside.isalnum():
-            symbol = inside
-    symbol = symbol or "MSFT"
+    competitor = None
+
+    if GOOGLE_API_KEY:
+        try:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            # Improved prompt to handle natural language better
+            resp = model.generate_content(
+                f"Analyze this user prompt: '{prompt}'. "
+                "Identify the company name and its stock symbol if possible. "
+                "Return JSON: {{\"symbol\": \"AAPL\", \"company\": \"Apple Inc\"}}. "
+                "If symbol is unknown, set it to null. If company is unknown, set it to null."
+            )
+            text = resp.text.strip()
+            # Strip markdown code blocks if present
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1] if "\n" in text else text
+                if text.endswith("```"):
+                    text = text.rsplit("\n", 1)[0] if "\n" in text else text
+            
+            try:
+                data = json.loads(text)
+                symbol = data.get("symbol")
+                competitor = data.get("company")
+            except json.JSONDecodeError:
+                # Fallback if JSON parsing fails
+                pass
+        except Exception as e:
+            print(f"LLM extraction failed: {e}")
+
+    # 2. Fallback Heuristics
+    if not symbol:
+        # Finance symbol heuristic: if user includes ticker like (AAPL) use it.
+        if "(" in prompt and ")" in prompt:
+            try:
+                inside = prompt.split("(", 1)[1].split(")", 1)[0].strip().upper()
+                if 1 <= len(inside) <= 6 and inside.isalnum():
+                    symbol = inside
+            except Exception:
+                pass
+        
+        # Simple lookup
+        if not symbol:
+            lookup = {
+                "APPLE": "AAPL", "MICROSOFT": "MSFT", "GOOGLE": "GOOGL",
+                "AMAZON": "AMZN", "TESLA": "TSLA", "META": "META",
+                "NVIDIA": "NVDA", "NETFLIX": "NFLX", "ALPHABET": "GOOGL",
+                "FACEBOOK": "META", "BMW": "BMW.DE"
+            }
+            prompt_upper = prompt.upper()
+            for name, ticker in lookup.items():
+                if name in prompt_upper:
+                    symbol = ticker
+                    break
+
+    # 3. Determine Competitor Name
+    if not competitor:
+        if symbol:
+            competitor = symbol
+        else:
+            # If prompt is short, assume it's the company name
+            clean_prompt = prompt.strip()
+            if len(clean_prompt) < 50:
+                competitor = clean_prompt
+            else:
+                # Extract capitalized words as fallback
+                tokens = prompt.replace("\n", " ").split(" ")
+                caps = [t.strip(" ,.!?\"'") for t in tokens if t and t[0].isupper()]
+                if caps:
+                    competitor = " ".join(caps[:3])
+                else:
+                    competitor = "Unknown Company"
+
+    # 4. Final Symbol Fallback
+    if not symbol or symbol == "UNKNOWN":
+        # If we have a competitor name, use it as the symbol so we get mock data for it
+        # instead of "UNKNOWN".
+        if competitor and competitor != "Unknown Company":
+            symbol = competitor.upper().replace(" ", "")[:10]
+        else:
+            # Absolute fallback
+            symbol = "AAPL"
+            if not competitor or competitor == "Unknown Company":
+                competitor = "Apple Inc"
 
     planned = [
         {
@@ -283,8 +460,79 @@ def decompose_prompt(prompt: str) -> dict[str, Any]:
     return {"competitor": competitor, "symbol": symbol, "tasks": planned}
 
 
+def generate_report(competitor: str, news_data: dict, finance_data: dict) -> str:
+    # Prepare data strings first, as they are needed for both LLM and fallback
+    news_text = ""
+    for i, r in enumerate(news_data.get("results", [])):
+        news_text += f"{i+1}. {r.get('title')} - {r.get('url')}\n   {r.get('snippet')}\n"
+        
+    fin_overview = finance_data.get("overview", {})
+    fin_json = json.dumps(fin_overview, indent=2)
+
+    # Format financial data as Markdown table for fallback
+    fin_table_rows = []
+    fin_table_rows.append("| Metric | Value |")
+    fin_table_rows.append("| :--- | :--- |")
+    
+    metrics = [
+        ("market_cap", "Market Cap"),
+        ("pe_ratio", "P/E Ratio"),
+        ("profit_margin", "Profit Margin"),
+        ("52w_high", "52 Week High"),
+        ("52w_low", "52 Week Low"),
+        ("sector", "Sector"),
+        ("industry", "Industry")
+    ]
+    
+    for key, label in metrics:
+        val = fin_overview.get(key)
+        if val:
+            fin_table_rows.append(f"| {label} | {val} |")
+            
+    # Add any other scalar values not in the list
+    for k, v in fin_overview.items():
+        if k not in [m[0] for m in metrics] and k not in ["history", "description", "symbol", "name", "mock", "note"] and isinstance(v, (str, int, float)):
+             fin_table_rows.append(f"| {k.replace('_', ' ').title()} | {v} |")
+
+    fin_table = "\n".join(fin_table_rows)
+
+    # Try LLM generation if key exists
+    if GOOGLE_API_KEY:
+        try:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            prompt = (
+                f"Write a comprehensive financial report for '{competitor}' in Markdown format.\n\n"
+                f"### Financial Data\n{fin_json}\n\n"
+                f"### Recent News\n{news_text}\n\n"
+                "The report should include:\n"
+                "- Executive Summary\n"
+                "- Key Financial Metrics (Market Cap, P/E, etc.)\n"
+                "- Recent Developments & News Analysis\n"
+                "- Conclusion/Outlook\n"
+                "- List of Sources (URLs)\n\n"
+                "Format cleanly with Markdown headers, bullet points, and bold text where appropriate."
+            )
+            resp = model.generate_content(prompt)
+            return resp.text
+        except Exception as e:
+            print(f"LLM generation failed: {e}")
+            # Fall through to fallback
+    
+    # Fallback static report
+    return (
+        f"# Financial Report for {competitor}\n\n"
+        f"### Financial Overview\n{fin_table}\n\n"
+        f"### Recent News\n{news_text}\n\n"
+        "*(Note: Automated report generation unavailable. Displaying formatted data.)*"
+    )
+
+
 async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[str, Any], None]:
     plan = decompose_prompt(prompt)
+    if "error" in plan:
+        yield {"type": "error", "payload": {"message": plan["error"]}}
+        return
+
     planned_tasks = plan["tasks"]
 
     yield {"type": "task_planned", "payload": {"tasks": planned_tasks, "plan": plan}}
@@ -292,10 +540,11 @@ async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[st
     # Run researcher + analyst concurrently (still considered sequential pipeline into writer).
     async def do_news() -> dict[str, Any]:
         query = f"{plan['competitor']} latest news press release product launch"
-        results = await tavily_search(query)
+        search_data = await tavily_search(query)
         return {
             "query": query,
-            "results": [r.__dict__ for r in results],
+            "results": [r.__dict__ for r in search_data["results"]],
+            "images": search_data["images"],
         }
 
     async def do_finance() -> dict[str, Any]:
@@ -324,39 +573,13 @@ async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[st
 
     yield {"type": "agent_started", "payload": {"agent": "ReportWriter"}}
 
-    # Synthesize memo (deterministic template). Swap for LLM later.
+    # Synthesize memo using LLM
     sources: list[dict[str, Any]] = []
     for r in news.get("results", []):
         if r.get("url"):
             sources.append({"title": r.get("title"), "url": r.get("url")})
 
-    overview = finance.get("overview", {})
-    memo = "\n".join(
-        [
-            f"# Market Research Memo: {plan['competitor']}",
-            "",
-            "## Executive Summary",
-            f"This memo summarizes recent public signals and financial context for **{plan['competitor']}**.",
-            "",
-            "## Recent News & Product Signals",
-        ]
-        + [f"- [{r.get('title','(untitled)')}]({r.get('url','')}) — {r.get('snippet','')[:160]}" for r in news.get("results", [])]
-        + [
-            "",
-            "## Financial Snapshot",
-            f"- Symbol: `{overview.get('symbol')}`",
-            f"- Market Cap: {overview.get('market_cap')}",
-            f"- P/E Ratio: {overview.get('pe_ratio')}",
-            f"- Profit Margin: {overview.get('profit_margin')}",
-            "",
-            "## Implications",
-            "- Recent product/news momentum can signal investment areas and go-to-market priorities.",
-            "- Financial ratios should be interpreted alongside revenue growth and competitive positioning.",
-            "",
-            "## Sources",
-        ]
-        + [f"- {s['title']}: {s['url']}" for s in sources[:10]]
-    )
+    memo = generate_report(plan["competitor"], news, finance)
 
     yield {
         "type": "agent_output",
@@ -369,6 +592,10 @@ async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[st
 
 async def run_hierarchical(session_id: str, prompt: str) -> AsyncGenerator[dict[str, Any], None]:
     plan = decompose_prompt(prompt)
+    if "error" in plan:
+        yield {"type": "error", "payload": {"message": plan["error"]}}
+        return
+
     planned_tasks = [
         {"agent": "Manager", "title": "Create plan and delegate to specialists."},
         *plan["tasks"],
@@ -392,8 +619,11 @@ async def run_hierarchical(session_id: str, prompt: str) -> AsyncGenerator[dict[
     news_task = asyncio.create_task(tavily_search(f"{plan['competitor']} latest news press release product launch"))
     fin_task = asyncio.create_task(alphavantage_overview(plan["symbol"]))
 
-    news_results = await news_task
-    news_payload = {"results": [r.__dict__ for r in news_results]}
+    news_data = await news_task
+    news_payload = {
+        "results": [r.__dict__ for r in news_data["results"]],
+        "images": news_data["images"]
+    }
     yield {
         "type": "agent_output",
         "payload": {"agent": "NewsResearcher", "content": "Delivered news results to Manager.", "data": news_payload},
@@ -409,7 +639,7 @@ async def run_hierarchical(session_id: str, prompt: str) -> AsyncGenerator[dict[
     yield {"type": "agent_finished", "payload": {"agent": "FinancialAnalyst"}}
 
     # Manager validates (simple rule)
-    sources = [{"title": r.title, "url": r.url} for r in news_results if r.url]
+    sources = [{"title": r.title, "url": r.url} for r in news_data["results"] if r.url]
     ok = len(sources) >= 2
     yield {
         "type": "agent_output",
@@ -423,28 +653,7 @@ async def run_hierarchical(session_id: str, prompt: str) -> AsyncGenerator[dict[
 
     yield {"type": "agent_started", "payload": {"agent": "ReportWriter"}}
 
-    memo = "\n".join(
-        [
-            f"# Market Research Memo: {plan['competitor']}",
-            "",
-            "## Executive Summary",
-            f"This memo summarizes recent public signals and financial context for **{plan['competitor']}**.",
-            "",
-            "## Recent News & Product Signals",
-        ]
-        + [f"- [{r.title}]({r.url}) — {r.snippet[:160]}" for r in news_results]
-        + [
-            "",
-            "## Financial Snapshot",
-            f"- Symbol: `{fin_overview.get('symbol')}`",
-            f"- Market Cap: {fin_overview.get('market_cap')}",
-            f"- P/E Ratio: {fin_overview.get('pe_ratio')}",
-            f"- Profit Margin: {fin_overview.get('profit_margin')}",
-            "",
-            "## Sources",
-        ]
-        + [f"- {s['title']}: {s['url']}" for s in sources[:10]]
-    )
+    memo = generate_report(plan["competitor"], news_payload, fin_payload)
 
     yield {
         "type": "agent_output",

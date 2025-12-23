@@ -2,10 +2,12 @@
 
 import type React from "react"
 
-import { Suspense, useMemo, useRef, useState } from "react"
+import { Suspense, useEffect, useMemo, useRef, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import Link from "next/link"
 import { ArrowLeft, Play, Copy, Check, Zap, Newspaper, TrendingUp, PenTool, ExternalLink, Loader2 } from "lucide-react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -13,6 +15,8 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { createSession, runSession, streamSessionEvents, type PlannedTask, type RunMode, type SSEEvent } from "@/lib/api"
+import { FinancialChart } from "@/components/financial-chart"
+import { NewsCard } from "@/components/news-card"
 
 type AgentName = "Manager" | "NewsResearcher" | "FinancialAnalyst" | "ReportWriter"
 type AgentStatus = "idle" | "running" | "done"
@@ -23,6 +27,8 @@ type ChatMsg = {
   title: string
   content: string
   kind: "status" | "output"
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data?: any
 }
 
 const AGENTS: {
@@ -37,6 +43,13 @@ const AGENTS: {
   { name: "ReportWriter", label: "Writer", icon: PenTool, color: "text-amber-400" },
 ]
 
+const QUICK_PROMPTS = [
+  "Analyze Apple (AAPL)",
+  "Compare Tesla vs Rivian",
+  "Market outlook for AI stocks",
+  "Latest crypto trends",
+]
+
 function uid() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16)
 }
@@ -47,7 +60,7 @@ function ChatInner() {
 
   const [mode, setMode] = useState<RunMode>(initialMode)
   const [prompt, setPrompt] = useState<string>(
-    "Generate a comprehensive market report on Competitor X. Focus on the last 30 days: product launches, press releases, and investor-relevant signals.",
+    "Generate a comprehensive market report on Apple (AAPL). Focus on the last 30 days: product launches, press releases, and investor-relevant signals.",
   )
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
@@ -67,6 +80,12 @@ function ChatInner() {
   const [error, setError] = useState<string | null>(null)
 
   const cleanupRef = useRef<null | (() => void)>(null)
+
+  useEffect(() => {
+    return () => {
+      cleanupRef.current?.()
+    }
+  }, [])
 
   const agentMap = useMemo(() => Object.fromEntries(AGENTS.map((a) => [a.name, a])), [])
 
@@ -99,6 +118,7 @@ function ChatInner() {
         title: "Output",
         content: ev.payload.content as string,
         kind: "output",
+        data: ev.payload.data,
       })
       return
     }
@@ -160,7 +180,7 @@ function ChatInner() {
   const visibleAgents = mode === "hierarchical" ? AGENTS : AGENTS.filter((a) => a.name !== "Manager")
 
   return (
-    <div className="flex h-screen flex-col bg-background">
+    <div className="flex h-full flex-col bg-background">
       {/* Header */}
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-border/50 px-4 lg:px-6">
         <div className="flex items-center gap-4">
@@ -279,12 +299,26 @@ function ChatInner() {
         <main className="flex flex-1 flex-col overflow-hidden">
           {/* Input Area */}
           <div className="shrink-0 border-b border-border/50 p-4 lg:p-6">
+            <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
+              {QUICK_PROMPTS.map((qp) => (
+                <Button
+                  key={qp}
+                  variant="outline"
+                  size="sm"
+                  className="h-7 whitespace-nowrap text-xs"
+                  onClick={() => setPrompt(qp)}
+                  disabled={running}
+                >
+                  {qp}
+                </Button>
+              ))}
+            </div>
             <Textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={3}
               className="resize-none bg-card/50"
-              placeholder="Describe what you want to research..."
+              placeholder="Describe what you want to research (e.g., Analyze Apple (AAPL))..."
               disabled={running}
             />
             <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -360,6 +394,31 @@ function ChatInner() {
                             }`}
                           >
                             {m.content}
+                            {m.agent === "FinancialAnalyst" && m.data?.overview && (
+                              <div className="mt-4">
+                                <FinancialChart
+                                  data={m.data.overview.history || []}
+                                  title={`Stock Price History: ${m.data.overview.symbol}`}
+                                  symbol={m.data.overview.symbol}
+                                />
+                              </div>
+                            )}
+                            {m.agent === "NewsResearcher" && m.data?.results && (
+                              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                                {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                                {m.data.results.map((item: any, idx: number) => (
+                                  <NewsCard
+                                    key={idx}
+                                    news={{
+                                      title: item.title,
+                                      url: item.url,
+                                      summary: item.snippet,
+                                      date: item.published_at,
+                                    }}
+                                  />
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -376,8 +435,10 @@ function ChatInner() {
                           <span className="text-sm font-medium">Writer</span>
                           <span className="text-xs text-muted-foreground">Final Report</span>
                         </div>
-                        <div className="rounded-lg border border-accent/30 bg-card p-4">
-                          <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">{finalMarkdown}</pre>
+                        <div className="rounded-lg border border-accent/30 bg-card p-6 text-sm leading-relaxed overflow-x-auto prose dark:prose-invert max-w-none prose-sm prose-headings:font-semibold prose-a:text-primary prose-a:no-underline hover:prose-a:underline prose-pre:bg-muted prose-pre:text-foreground prose-table:border-collapse prose-th:border prose-th:border-border prose-th:p-2 prose-td:border prose-td:border-border prose-td:p-2">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {finalMarkdown}
+                          </ReactMarkdown>
                         </div>
                       </div>
                     </div>

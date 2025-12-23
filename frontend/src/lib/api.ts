@@ -8,17 +8,19 @@ export type PlannedTask = {
 export type SSEEvent =
   | { type: "session_created"; payload: { id: string } }
   | { type: "run_requested"; payload: { id: string } }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | { type: "task_planned"; payload: { tasks: PlannedTask[]; plan: any } }
   | { type: "agent_started"; payload: { agent: string } }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   | { type: "agent_output"; payload: { agent: string; content: string; data?: any } }
   | { type: "agent_finished"; payload: { agent: string } }
   | { type: "final_report"; payload: { markdown: string; sources: { title: string; url: string }[] } }
   | { type: "error"; payload: { message: string } };
 
 export function backendUrl(): string {
-  // Our dev backend runs on :8010 (see [`frontend/.env.local.example`](frontend/.env.local.example)).
-  // Defaulting to :8010 avoids "Failed to fetch" when env vars aren't loaded.
-  return process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8010";
+  // Our dev backend runs on :8000 (see [`frontend/.env.local.example`](frontend/.env.local.example)).
+  // Defaulting to :8000 avoids "Failed to fetch" when env vars aren't loaded.
+  return process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 }
 
 export async function createSession(prompt: string, mode: RunMode): Promise<{ id: string }> {
