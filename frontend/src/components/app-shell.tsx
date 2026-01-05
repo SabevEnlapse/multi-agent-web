@@ -3,6 +3,15 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
+/**
+ * App Shell Component
+ *
+ * Provides the main layout structure for the application.
+ * - Includes a top navigation bar with branding and links.
+ * - Defines the main content area and sidebar slots.
+ * - Handles responsive layout behavior.
+ */
+
 export type AppShellProps = {
   title?: string;
   subtitle?: string;

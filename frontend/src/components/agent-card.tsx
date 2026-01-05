@@ -1,6 +1,14 @@
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 
+/**
+ * Agent Card Component
+ *
+ * Displays the status of a specific agent (e.g., NewsResearcher, FinancialAnalyst).
+ * - Shows agent name and label.
+ * - Visualizes status (idle, running, done) with color-coded indicators.
+ */
+
 export type AgentStatus = "idle" | "running" | "done";
 
 export type AgentMeta = {

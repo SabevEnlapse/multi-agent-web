@@ -5,7 +5,7 @@ import type React from "react"
 import { Suspense, useEffect, useMemo, useRef, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Play, Copy, Check, Zap, Newspaper, TrendingUp, PenTool, ExternalLink, Loader2 } from "lucide-react"
+import { ArrowLeft, Play, Copy, Check, Zap, Newspaper, TrendingUp, PenTool, ExternalLink, Loader2, ChevronDown, ChevronUp, FileText, Search, BarChart3 } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
@@ -16,7 +16,18 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { createSession, runSession, streamSessionEvents, type PlannedTask, type RunMode, type SSEEvent } from "@/lib/api"
 import { FinancialChart } from "@/components/financial-chart"
+import { FinancialReportTable } from "@/components/financial-report-table"
 import { NewsCard } from "@/components/news-card"
+
+/**
+ * Chat Workspace Page
+ *
+ * This is the main interface for the multi-agent system. It handles:
+ * 1. Session Management: Creating and running research sessions.
+ * 2. Real-time Updates: Listening to Server-Sent Events (SSE) from the backend.
+ * 3. UI State: Managing the state of agents, tasks, and messages.
+ * 4. Visualization: Rendering agent outputs (text, charts, news cards).
+ */
 
 type AgentName = "Manager" | "NewsResearcher" | "FinancialAnalyst" | "ReportWriter"
 type AgentStatus = "idle" | "running" | "done"
@@ -55,6 +66,7 @@ function uid() {
 }
 
 function ChatInner() {
+  // URL params to determine initial mode (sequential vs hierarchical)
   const sp = useSearchParams()
   const initialMode = (sp.get("mode") as RunMode) || "sequential"
 
@@ -65,6 +77,7 @@ function ChatInner() {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [isStepsOpen, setIsStepsOpen] = useState(false)
 
   const [tasks, setTasks] = useState<PlannedTask[]>([])
   const [agentStatus, setAgentStatus] = useState<Record<AgentName, AgentStatus>>({
@@ -93,6 +106,10 @@ function ChatInner() {
     setMessages((prev) => [...prev, { ...m, id: uid() }])
   }
 
+  /**
+   * Handles incoming Server-Sent Events (SSE) from the backend.
+   * Updates the UI state based on the event type.
+   */
   function onSSE(ev: SSEEvent) {
     if (ev.type === "task_planned") {
       setTasks(ev.payload.tasks as PlannedTask[])
@@ -147,6 +164,13 @@ function ChatInner() {
     }
   }
 
+  /**
+   * Starts a new research session.
+   * 1. Resets all state (messages, tasks, etc.).
+   * 2. Creates a session via API.
+   * 3. Connects to the SSE stream.
+   * 4. Triggers the run.
+   */
   async function onRun() {
     setError(null)
     setFinalMarkdown(null)
@@ -297,156 +321,264 @@ function ChatInner() {
 
         {/* Main Content */}
         <main className="flex flex-1 flex-col overflow-hidden">
-          {/* Input Area */}
-          <div className="shrink-0 border-b border-border/50 p-4 lg:p-6">
-            <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
-              {QUICK_PROMPTS.map((qp) => (
-                <Button
-                  key={qp}
-                  variant="outline"
-                  size="sm"
-                  className="h-7 whitespace-nowrap text-xs"
-                  onClick={() => setPrompt(qp)}
-                  disabled={running}
-                >
-                  {qp}
-                </Button>
-              ))}
-            </div>
-            <Textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={3}
-              className="resize-none bg-card/50"
-              placeholder="Describe what you want to research (e.g., Analyze Apple (AAPL))..."
-              disabled={running}
-            />
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <Button onClick={() => void onRun()} disabled={running || prompt.trim().length < 3} className="gap-2">
-                {running ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Running...
-                  </>
-                ) : (
-                  <>
-                    <Play className="h-4 w-4" />
-                    Run Crew
-                  </>
-                )}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={copyMarkdown}
-                disabled={!finalMarkdown}
-                className="gap-2 bg-transparent"
-              >
-                {copied ? (
-                  <>
-                    <Check className="h-4 w-4" />
-                    Copied
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-4 w-4" />
-                    Copy Report
-                  </>
-                )}
-              </Button>
-              {error && <p className="text-sm text-destructive">{error}</p>}
-            </div>
-          </div>
-
           {/* Messages Area */}
           <ScrollArea className="flex-1">
-            <div className="p-4 lg:p-6">
+            <div className="mx-auto max-w-4xl p-4 lg:p-8">
               {messages.length === 0 && !finalMarkdown ? (
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                  <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-                    <Zap className="h-6 w-6 text-muted-foreground" />
+                <div className="flex h-full flex-col items-center justify-center py-20">
+                  <div className="mb-8 text-center">
+                    <h1 className="mb-3 text-3xl font-semibold tracking-tight">What would you like to research?</h1>
+                    <p className="text-muted-foreground">
+                      Deploy a team of AI agents to analyze markets, news, and financial data.
+                    </p>
                   </div>
-                  <h3 className="mb-2 font-medium">Ready to run</h3>
-                  <p className="max-w-sm text-sm text-muted-foreground">
-                    Enter a research prompt and click Run Crew. Agents will decompose the task and stream their outputs
-                    in real-time.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {messages.map((m) => {
-                    const agent = agentMap[m.agent]
-                    const Icon = agent?.icon || Zap
-                    return (
-                      <div key={m.id} className="flex gap-3">
-                        <div
-                          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-card ${agent?.color || ""}`}
-                        >
-                          <Icon className="h-4 w-4" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="mb-1 flex items-center gap-2">
-                            <span className="text-sm font-medium">{agent?.label}</span>
-                            <span className="text-xs text-muted-foreground">{m.title}</span>
-                          </div>
-                          <div
-                            className={`rounded-lg border border-border/60 p-4 text-sm leading-relaxed ${
-                              m.kind === "output" ? "bg-card" : "bg-card/50"
-                            }`}
-                          >
-                            {m.content}
-                            {m.agent === "FinancialAnalyst" && m.data?.overview && (
-                              <div className="mt-4">
-                                <FinancialChart
-                                  data={m.data.overview.history || []}
-                                  title={`Stock Price History: ${m.data.overview.symbol}`}
-                                  symbol={m.data.overview.symbol}
-                                />
-                              </div>
-                            )}
-                            {m.agent === "NewsResearcher" && m.data?.results && (
-                              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-                                {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                                {m.data.results.map((item: any, idx: number) => (
-                                  <NewsCard
-                                    key={idx}
-                                    news={{
-                                      title: item.title,
-                                      url: item.url,
-                                      summary: item.snippet,
-                                      date: item.published_at,
-                                    }}
-                                  />
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
 
-                  {finalMarkdown && (
-                    <div className="flex gap-3">
-                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-card text-amber-400">
-                        <PenTool className="h-4 w-4" />
-                      </div>
-                      <div className="flex-1">
-                        <div className="mb-1 flex items-center gap-2">
-                          <span className="text-sm font-medium">Writer</span>
-                          <span className="text-xs text-muted-foreground">Final Report</span>
-                        </div>
-                        <div className="rounded-lg border border-accent/30 bg-card p-6 text-sm leading-relaxed overflow-x-auto prose dark:prose-invert max-w-none prose-sm prose-headings:font-semibold prose-a:text-primary prose-a:no-underline hover:prose-a:underline prose-pre:bg-muted prose-pre:text-foreground prose-table:border-collapse prose-th:border prose-th:border-border prose-th:p-2 prose-td:border prose-td:border-border prose-td:p-2">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                            {finalMarkdown}
-                          </ReactMarkdown>
-                        </div>
+                  <div className="w-full max-w-2xl">
+                    <div className="relative mb-8">
+                      <Textarea
+                        value={prompt}
+                        onChange={(e) => setPrompt(e.target.value)}
+                        rows={3}
+                        className="resize-none rounded-xl border-border/50 bg-card p-4 text-base shadow-sm transition-all focus:border-primary/50 focus:ring-1 focus:ring-primary/50"
+                        placeholder="Ask anything (e.g., 'Deep dive into NVIDIA's AI strategy')..."
+                        disabled={running}
+                      />
+                      <div className="absolute bottom-3 right-3">
+                        <Button
+                          size="sm"
+                          onClick={() => void onRun()}
+                          disabled={running || prompt.trim().length < 3}
+                          className="h-8 rounded-lg px-3"
+                        >
+                          {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4 fill-current" />}
+                        </Button>
                       </div>
                     </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      {QUICK_PROMPTS.map((qp) => (
+                        <button
+                          key={qp}
+                          onClick={() => setPrompt(qp)}
+                          className="flex items-center gap-3 rounded-xl border border-border/50 bg-card/50 p-4 text-left transition-all hover:border-primary/20 hover:bg-card hover:shadow-sm"
+                        >
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-background">
+                            <Search className="h-4 w-4 text-muted-foreground" />
+                          </div>
+                          <span className="text-sm font-medium">{qp}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-8 pb-20">
+                  {/* Analysis Steps (Collapsible) */}
+                  {messages.length > 0 && (
+                    <div className="rounded-xl border border-border/50 bg-card/30 overflow-hidden">
+                      <button
+                        onClick={() => setIsStepsOpen(!isStepsOpen)}
+                        className="flex w-full items-center justify-between bg-card/50 px-4 py-3 text-sm font-medium transition-colors hover:bg-card"
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className={`flex h-2 w-2 rounded-full ${running ? "animate-pulse bg-accent" : "bg-emerald-500"}`} />
+                          <span>Analysis Steps</span>
+                          <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                            {messages.length} steps
+                          </span>
+                        </div>
+                        {isStepsOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+                      </button>
+                      
+                      {isStepsOpen && (
+                        <div className="divide-y divide-border/50 border-t border-border/50">
+                          {messages.map((m) => {
+                            const agent = agentMap[m.agent]
+                            const Icon = agent?.icon || Zap
+                            return (
+                              <div key={m.id} className="flex gap-4 p-4">
+                                <div
+                                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-card ${agent?.color || ""}`}
+                                >
+                                  <Icon className="h-4 w-4" />
+                                </div>
+                                <div className="flex-1 overflow-hidden">
+                                  <div className="mb-1 flex items-center gap-2">
+                                    <span className="text-sm font-medium">{agent?.label}</span>
+                                    <span className="text-xs text-muted-foreground">• {m.title}</span>
+                                  </div>
+                                  <div className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap font-mono text-xs bg-muted/30 p-3 rounded-md">
+                                    {m.content}
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
                   )}
+
+                  {/* Main Content Area (Charts & Report) */}
+                  <div className="space-y-8">
+                    {/* Charts Section */}
+                    {messages.some(m => m.agent === "FinancialAnalyst" && m.data?.overview) && (
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground uppercase tracking-wider">
+                          <BarChart3 className="h-4 w-4" />
+                          Market Data
+                        </div>
+                        {messages
+                          .filter(m => m.agent === "FinancialAnalyst" && m.data?.overview)
+                          .map((m) => (
+                            <div key={m.id} className="space-y-6">
+                              <FinancialChart
+                                symbol={m.data.overview.symbol}
+                              />
+                            </div>
+                          ))}
+                      </div>
+                    )}
+
+                    {/* News Section */}
+                    {messages.some(m => m.agent === "NewsResearcher" && m.data?.results) && (
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground uppercase tracking-wider">
+                          <Newspaper className="h-4 w-4" />
+                          Key Developments
+                        </div>
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                          {messages
+                            .filter(m => m.agent === "NewsResearcher" && m.data?.results)
+                            .flatMap(m => m.data.results)
+                            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                            .map((item: any, idx: number) => (
+                              <NewsCard
+                                key={idx}
+                                news={{
+                                  title: item.title,
+                                  url: item.url,
+                                  summary: item.snippet,
+                                  date: item.published_at,
+                                }}
+                              />
+                            ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Final Report Artifact */}
+                    {finalMarkdown && (
+                      <div className="animate-in fade-in slide-in-from-bottom-4 duration-700 space-y-8">
+                        {/* Financial Report Table (Moved here) */}
+                        {messages.some(m => m.agent === "FinancialAnalyst" && m.data?.overview) && (
+                          <div className="space-y-4">
+                            <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground uppercase tracking-wider">
+                              <TrendingUp className="h-4 w-4" />
+                              Financial Overview
+                            </div>
+                            {messages
+                              .filter(m => m.agent === "FinancialAnalyst" && m.data?.overview)
+                              .map((m) => (
+                                <FinancialReportTable
+                                  key={m.id}
+                                  data={m.data.overview}
+                                />
+                              ))}
+                          </div>
+                        )}
+
+                        <div>
+                          <div className="mb-4 flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground uppercase tracking-wider">
+                              <FileText className="h-4 w-4" />
+                              Intelligence Report
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={copyMarkdown}
+                              className="h-8 gap-2 text-xs"
+                            >
+                              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                              {copied ? "Copied" : "Copy Report"}
+                            </Button>
+                          </div>
+                          
+                          <div className="rounded-xl border border-border/50 bg-[#fcfcfc] dark:bg-[#1a1a1a] p-8 shadow-sm md:p-12">
+                            <article className="prose prose-slate dark:prose-invert max-w-none prose-headings:font-serif prose-headings:font-bold prose-h1:text-3xl prose-h2:text-2xl prose-p:leading-relaxed prose-p:text-base prose-li:text-base">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {finalMarkdown}
+                              </ReactMarkdown>
+                            </article>
+                            
+                            {/* Sources Footer */}
+                            {sources.length > 0 && (
+                              <div className="mt-12 border-t border-border/50 pt-6">
+                                <h4 className="mb-4 text-xs font-medium uppercase tracking-wider text-muted-foreground">Referenced Sources</h4>
+                                <div className="flex flex-wrap gap-2">
+                                  {sources.map((s, idx) => (
+                                    <a
+                                      key={idx}
+                                      href={s.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="flex items-center gap-2 rounded-full border border-border/50 bg-background px-3 py-1.5 text-xs transition-colors hover:border-primary/30 hover:bg-accent/5"
+                                    >
+                                      <img
+                                        src={`https://www.google.com/s2/favicons?domain=${new URL(s.url).hostname}`}
+                                        alt=""
+                                        className="h-3 w-3 opacity-70"
+                                        onError={(e) => e.currentTarget.style.display = 'none'}
+                                      />
+                                      <span className="max-w-[150px] truncate">{new URL(s.url).hostname.replace('www.', '')}</span>
+                                    </a>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
           </ScrollArea>
+
+          {/* Floating Input (When content exists) */}
+          {(messages.length > 0 || finalMarkdown) && (
+            <div className="fixed bottom-6 left-1/2 z-50 w-full max-w-2xl -translate-x-1/2 px-4">
+              <div className="relative rounded-xl border border-border/50 bg-background/80 shadow-lg backdrop-blur-md transition-all focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/50">
+                <Textarea
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  rows={1}
+                  className="max-h-32 min-h-[3rem] w-full resize-none bg-transparent px-4 py-3 pr-12 text-sm focus-visible:ring-0"
+                  placeholder="Ask a follow-up question..."
+                  disabled={running}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (!running && prompt.trim().length >= 3) void onRun();
+                    }
+                  }}
+                />
+                <div className="absolute bottom-2 right-2">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 rounded-lg hover:bg-primary/10 hover:text-primary"
+                    onClick={() => void onRun()}
+                    disabled={running || prompt.trim().length < 3}
+                  >
+                    {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4 fill-current" />}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
         </main>
 
         {/* Right Panel - Stats */}
@@ -510,3 +642,4 @@ export default function ChatPage() {
     </Suspense>
   )
 }
+

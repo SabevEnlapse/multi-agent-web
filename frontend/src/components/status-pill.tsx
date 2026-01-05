@@ -1,6 +1,15 @@
 import type React from "react"
 import { cn } from "@/lib/utils"
 
+/**
+ * Status Pill Component
+ *
+ * A versatile badge component for displaying status states.
+ * - Supports multiple tones (neutral, good, warn, info, error).
+ * - Optional pulsing animation for active states.
+ * - Used for task statuses, agent states, and system health.
+ */
+
 export type StatusTone = "neutral" | "good" | "warn" | "info" | "error"
 
 interface StatusPillProps {

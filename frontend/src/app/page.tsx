@@ -2,6 +2,16 @@ import Link from "next/link"
 import { ArrowRight, Zap, FileText, BarChart3, Search, Users, Activity, ArrowUpRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
+/**
+ * Landing Page Component
+ *
+ * This is the entry point of the application. It provides:
+ * 1. A marketing overview of the platform's capabilities.
+ * 2. Navigation to the main application workspace (/chat).
+ * 3. Options to start in either Sequential or Hierarchical mode.
+ *
+ * It uses a modern, dark-themed UI with Tailwind CSS for styling.
+ */
 export default function Home() {
   return (
     <div className="min-h-screen bg-background">

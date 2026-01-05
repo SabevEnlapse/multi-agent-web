@@ -1,3 +1,12 @@
+/**
+ * API Client Library
+ *
+ * Handles communication with the backend API.
+ * - Defines types for API requests and responses.
+ * - Provides functions to create and run sessions.
+ * - Manages Server-Sent Events (SSE) connection for real-time updates.
+ */
+
 export type RunMode = "sequential" | "hierarchical";
 
 export type PlannedTask = {
@@ -23,6 +32,12 @@ export function backendUrl(): string {
   return process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 }
 
+/**
+ * Creates a new research session.
+ * @param prompt The user's research query.
+ * @param mode The execution mode (sequential or hierarchical).
+ * @returns The created session ID.
+ */
 export async function createSession(prompt: string, mode: RunMode): Promise<{ id: string }> {
   const res = await fetch(`${backendUrl()}/api/sessions`, {
     method: "POST",
@@ -38,6 +53,10 @@ export async function createSession(prompt: string, mode: RunMode): Promise<{ id
   return res.json();
 }
 
+/**
+ * Triggers the execution of a session.
+ * @param sessionId The ID of the session to run.
+ */
 export async function runSession(sessionId: string): Promise<void> {
   const res = await fetch(`${backendUrl()}/api/sessions/${sessionId}/run`, {
     method: "POST",
@@ -49,6 +68,12 @@ export async function runSession(sessionId: string): Promise<void> {
   }
 }
 
+/**
+ * Connects to the backend SSE endpoint to receive real-time updates.
+ * @param sessionId The ID of the session to monitor.
+ * @param onEvent Callback function to handle incoming events.
+ * @returns A cleanup function to close the connection.
+ */
 export function streamSessionEvents(sessionId: string, onEvent: (ev: SSEEvent) => void): () => void {
   const es = new EventSource(`${backendUrl()}/api/sessions/${sessionId}/events`);
 

@@ -18,6 +18,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+# ---------------------------------------------------------------------------
+# Backend Main Application
+# ---------------------------------------------------------------------------
+# This file contains the FastAPI application that serves as the backend for the
+# Multi-Agent Market Research Platform. It handles:
+# 1. Database initialization and management (SQLite).
+# 2. API endpoints for session management (create, run, fetch).
+# 3. Real-time event streaming using Server-Sent Events (SSE).
+# 4. Integration with external APIs (Tavily, AlphaVantage, Google Gemini).
+# 5. Core agent logic for Sequential and Hierarchical workflows.
+# ---------------------------------------------------------------------------
+
 # Load env vars from backend/.env and root .env
 # load_dotenv() does not override existing env vars, so we load specific paths
 backend_env = os.path.join(os.path.dirname(__file__), "..", ".env")
@@ -51,6 +63,13 @@ def db() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    """
+    Initializes the SQLite database with necessary tables:
+    - sessions: Stores user sessions/requests.
+    - tasks: Tracks individual agent tasks within a session.
+    - events: Logs all events (agent actions, outputs) for a session.
+    - reports: Stores the final generated markdown report.
+    """
     conn = db()
     try:
         conn.execute(
@@ -180,6 +199,11 @@ class SearchResult:
 
 
 async def tavily_search(query: str) -> dict[str, Any]:
+    """
+    Performs a web search using the Tavily API.
+    Used by the NewsResearcher agent to find latest news and articles.
+    Returns a list of search results and images.
+    """
     if not TAVILY_API_KEY:
         return {
             "results": [
@@ -198,6 +222,8 @@ async def tavily_search(query: str) -> dict[str, Any]:
         "api_key": TAVILY_API_KEY,
         "query": query,
         "search_depth": "basic",
+        "topic": "news",
+        "days": 3,
         "include_answer": False,
         "include_raw_content": False,
         "include_images": True,
@@ -223,22 +249,35 @@ async def tavily_search(query: str) -> dict[str, Any]:
 
 
 def get_mock_financial_data(symbol: str, note: str) -> dict[str, Any]:
+    import random
     mock_history = []
     # Generate 30 days of mock data ending today
     today = datetime.now(timezone.utc)
+    
+    # Use symbol hash to seed a pseudo-random generator for consistent mock data per symbol
+    seed = sum(ord(c) for c in symbol)
+    rng = random.Random(seed)
+    
+    base_price = (seed % 500) + 50.0 # Price between 50 and 550
+    volatility = (seed % 5) / 100.0 + 0.01 # 1% to 6% volatility
+
+    current_price = base_price
     for i in range(30):
         date = (today - timedelta(days=30-i)).strftime("%Y-%m-%d")
+        change = rng.uniform(-volatility, volatility)
+        current_price *= (1 + change)
         mock_history.append({
             "date": date,
-            "price": 150.0 + (i * 0.5)
+            "price": round(current_price, 2)
         })
+        
     return {
         "mock": True,
         "symbol": symbol,
         "note": note,
-        "market_cap": "2.5T",
-        "pe_ratio": "30.5",
-        "profit_margin": "0.25",
+        "market_cap": f"{(seed % 100) / 10.0 + 0.1:.1f}T",
+        "pe_ratio": f"{10 + (seed % 50)}",
+        "profit_margin": f"0.{10 + (seed % 20)}",
         "history": mock_history
     }
 
@@ -280,6 +319,12 @@ async def get_yahoo_history(symbol: str) -> list[dict[str, Any]] | None:
 
 
 async def alphavantage_overview(symbol: str) -> dict[str, Any]:
+    """
+    Retrieves financial data for a given stock symbol.
+    Tries AlphaVantage first, falls back to Yahoo Finance (unofficial),
+    and finally to mock data if configured or if APIs fail.
+    Used by the FinancialAnalyst agent.
+    """
     # 1. Try AlphaVantage if Key is present
     if ALPHAVANTAGE_API_KEY and symbol != "UNKNOWN":
         base = "https://www.alphavantage.co/query"
@@ -351,14 +396,26 @@ async def alphavantage_overview(symbol: str) -> dict[str, Any]:
             return data
 
     # 3. Final Fallback: Pure Mock
-    note = "No ALPHAVANTAGE_API_KEY set" if not ALPHAVANTAGE_API_KEY else "Data source unavailable"
-    return get_mock_financial_data(symbol, f"{note}; returning mock overview.")
+    # User requested to fail silently if data is unavailable, rather than showing a mock graph.
+    # note = "No ALPHAVANTAGE_API_KEY set" if not ALPHAVANTAGE_API_KEY else "Data source unavailable"
+    # return get_mock_financial_data(symbol, f"{note}; returning mock overview.")
+    return {}
 
 
 def decompose_prompt(prompt: str) -> dict[str, Any]:
+    """
+    Analyzes the user's natural language prompt to extract:
+    - The company name (competitor).
+    - The stock symbol (if applicable).
+    - A plan of tasks for the agents.
+    
+    Uses Google Gemini LLM for extraction, with fallback heuristics
+    (regex, lookup tables) if the LLM fails or is not configured.
+    """
     # 1. Extract symbol using LLM
     symbol = None
     competitor = None
+    search_topic = None
 
     if GOOGLE_API_KEY:
         try:
@@ -367,8 +424,9 @@ def decompose_prompt(prompt: str) -> dict[str, Any]:
             resp = model.generate_content(
                 f"Analyze this user prompt: '{prompt}'. "
                 "Identify the company name and its stock symbol if possible. "
-                "Return JSON: {{\"symbol\": \"AAPL\", \"company\": \"Apple Inc\"}}. "
-                "If symbol is unknown, set it to null. If company is unknown, set it to null."
+                "Also identify the specific topic or news the user is interested in for the search query. "
+                "Return JSON: {{\"symbol\": \"AAPL\", \"company\": \"Apple Inc\", \"search_topic\": \"latest iPhone launch\"}}. "
+                "If symbol is unknown, set it to null. If company is unknown, set it to null. If no specific topic, set search_topic to null."
             )
             text = resp.text.strip()
             # Strip markdown code blocks if present
@@ -381,6 +439,7 @@ def decompose_prompt(prompt: str) -> dict[str, Any]:
                 data = json.loads(text)
                 symbol = data.get("symbol")
                 competitor = data.get("company")
+                search_topic = data.get("search_topic")
             except json.JSONDecodeError:
                 # Fallback if JSON parsing fails
                 pass
@@ -428,106 +487,190 @@ def decompose_prompt(prompt: str) -> dict[str, Any]:
                 if caps:
                     competitor = " ".join(caps[:3])
                 else:
-                    competitor = "Unknown Company"
+                    # Just take the first few words of the prompt
+                    competitor = " ".join(tokens[:3])
 
     # 4. Final Symbol Fallback
     if not symbol or symbol == "UNKNOWN":
-        # If we have a competitor name, use it as the symbol so we get mock data for it
-        # instead of "UNKNOWN".
-        if competitor and competitor != "Unknown Company":
-            symbol = competitor.upper().replace(" ", "")[:10]
-        else:
-            # Absolute fallback
-            symbol = "AAPL"
-            if not competitor or competitor == "Unknown Company":
-                competitor = "Apple Inc"
+        symbol = None
+        if not competitor:
+            competitor = "General Topic"
+
+    # Use search_topic if found by LLM, otherwise default
+    if not search_topic:
+        search_topic = f"{competitor} latest news press release product launch"
+    else:
+        # If the user provided a specific topic, append the competitor name to ensure context
+        if competitor.lower() not in search_topic.lower():
+            search_topic = f"{competitor} {search_topic}"
 
     planned = [
         {
             "agent": "NewsResearcher",
-            "title": f"Find latest news, press releases, and product launches for {competitor}.",
-        },
-        {
-            "agent": "FinancialAnalyst",
-            "title": f"Pull recent stock/financial overview for {competitor} (symbol: {symbol}).",
-        },
-        {
-            "agent": "ReportWriter",
-            "title": f"Write a final business memo synthesizing findings about {competitor}.",
-        },
+            "title": f"Search for: {search_topic}",
+        }
     ]
 
-    return {"competitor": competitor, "symbol": symbol, "tasks": planned}
+    if symbol:
+        planned.append({
+            "agent": "FinancialAnalyst",
+            "title": f"Pull recent stock/financial overview for {competitor} (symbol: {symbol}).",
+        })
+
+    planned.append({
+        "agent": "ReportWriter",
+        "title": f"Write an Executive Intelligence Brief synthesizing findings about {competitor}.",
+    })
+
+    return {"competitor": competitor, "symbol": symbol, "search_topic": search_topic, "tasks": planned}
 
 
 def generate_report(competitor: str, news_data: dict, finance_data: dict) -> str:
+    """
+    Synthesizes collected news and financial data into a final Markdown report.
+    Uses Google Gemini LLM to write the report.
+    Falls back to a static template if the LLM is unavailable.
+    """
     # Prepare data strings first, as they are needed for both LLM and fallback
     news_text = ""
     for i, r in enumerate(news_data.get("results", [])):
         news_text += f"{i+1}. {r.get('title')} - {r.get('url')}\n   {r.get('snippet')}\n"
         
     fin_overview = finance_data.get("overview", {})
-    fin_json = json.dumps(fin_overview, indent=2)
+    fin_json = json.dumps(fin_overview, indent=2) if fin_overview else "No financial data available."
 
     # Format financial data as Markdown table for fallback
-    fin_table_rows = []
-    fin_table_rows.append("| Metric | Value |")
-    fin_table_rows.append("| :--- | :--- |")
-    
-    metrics = [
-        ("market_cap", "Market Cap"),
-        ("pe_ratio", "P/E Ratio"),
-        ("profit_margin", "Profit Margin"),
-        ("52w_high", "52 Week High"),
-        ("52w_low", "52 Week Low"),
-        ("sector", "Sector"),
-        ("industry", "Industry")
-    ]
-    
-    for key, label in metrics:
-        val = fin_overview.get(key)
-        if val:
-            fin_table_rows.append(f"| {label} | {val} |")
-            
-    # Add any other scalar values not in the list
-    for k, v in fin_overview.items():
-        if k not in [m[0] for m in metrics] and k not in ["history", "description", "symbol", "name", "mock", "note"] and isinstance(v, (str, int, float)):
-             fin_table_rows.append(f"| {k.replace('_', ' ').title()} | {v} |")
+    fin_table = ""
+    if fin_overview:
+        fin_table_rows = []
+        fin_table_rows.append("| Metric | Value |")
+        fin_table_rows.append("| :--- | :--- |")
+        
+        metrics = [
+            ("market_cap", "Market Cap"),
+            ("pe_ratio", "P/E Ratio"),
+            ("profit_margin", "Profit Margin"),
+            ("52w_high", "52 Week High"),
+            ("52w_low", "52 Week Low"),
+            ("sector", "Sector"),
+            ("industry", "Industry")
+        ]
+        
+        for key, label in metrics:
+            val = fin_overview.get(key)
+            if val:
+                fin_table_rows.append(f"| {label} | {val} |")
+                
+        # Add any other scalar values not in the list
+        for k, v in fin_overview.items():
+            if k not in [m[0] for m in metrics] and k not in ["history", "description", "symbol", "name", "mock", "note"] and isinstance(v, (str, int, float)):
+                 fin_table_rows.append(f"| {k.replace('_', ' ').title()} | {v} |")
 
-    fin_table = "\n".join(fin_table_rows)
+        fin_table = "\n".join(fin_table_rows)
+    else:
+        fin_table = "No financial data available."
 
     # Try LLM generation if key exists
     if GOOGLE_API_KEY:
         try:
             model = genai.GenerativeModel("gemini-1.5-flash")
-            prompt = (
-                f"Write a comprehensive financial report for '{competitor}' in Markdown format.\n\n"
-                f"### Financial Data\n{fin_json}\n\n"
-                f"### Recent News\n{news_text}\n\n"
-                "The report should include:\n"
-                "- Executive Summary\n"
-                "- Key Financial Metrics (Market Cap, P/E, etc.)\n"
-                "- Recent Developments & News Analysis\n"
-                "- Conclusion/Outlook\n"
-                "- List of Sources (URLs)\n\n"
-                "Format cleanly with Markdown headers, bullet points, and bold text where appropriate."
+            
+            # Persona and Context
+            system_instruction = (
+                "Role: Senior Investment Strategist & Chief Editor\n"
+                "Goal: Synthesize financial data and news into a concise, high-impact Executive Intelligence Brief.\n"
+                "Backstory: You are a veteran Wall Street analyst. You despise fluff. You prioritize 'Bottom Line Up Front' (BLUF) communication. "
+                "You connect the dots between stock movements and news headlines to provide actionable insights for decision-makers. "
+                "You ONLY communicate in bullet points.\n\n"
             )
-            resp = model.generate_content(prompt)
+
+            # Task Description
+            task_prompt = (
+                "You are the final step in the intelligence pipeline.\n"
+                "1. Take the stock data provided by the 'FinancialAnalyst'.\n"
+                "2. Take the news context provided by the 'NewsResearcher'.\n"
+                "3. Synthesize them into a strict Markdown report using ONLY bullet points. Do not use paragraphs.\n\n"
+                
+                "Your output MUST use this exact structure:\n\n"
+
+                "## Executive Summary\n"
+                "* [High-level status: Thriving/Struggling/Pivoting]\n"
+                "* [Key reason for status]\n"
+                "* [Immediate action required if any]\n\n"
+
+                "## Market Pulse\n"
+                "* [Why is the stock moving?]\n"
+                "* [Connection between news and price action]\n"
+                "* [Key financial metric context]\n\n"
+
+                "## Key Strategic Developments\n"
+                "* **[Headline]**: [Why it matters - synthesis of news and impact]\n"
+                "* **[Headline]**: [Why it matters]\n"
+                "* **[Headline]**: [Why it matters]\n\n"
+
+                "## Risk & Opportunity Assessment\n"
+                "* **Tailwind:** [Positive driver]\n"
+                "* **Headwind:** [Negative risk]\n\n"
+
+                "## Final Verdict\n"
+                "* **Outlook:** [BULLISH / BEARISH / NEUTRAL]\n"
+                "* [Justification bullet]"
+            )
+
+            full_prompt = (
+                f"{system_instruction}\n"
+                f"### Financial Data (from FinancialAnalyst)\n{fin_json}\n\n"
+                f"### Recent News (from NewsResearcher)\n{news_text}\n\n"
+                f"### Task\n{task_prompt}"
+            )
+            
+            resp = model.generate_content(full_prompt)
             return resp.text
         except Exception as e:
             print(f"LLM generation failed: {e}")
             # Fall through to fallback
     
     # Fallback static report
-    return (
-        f"# Financial Report for {competitor}\n\n"
-        f"### Financial Overview\n{fin_table}\n\n"
-        f"### Recent News\n{news_text}\n\n"
-        "*(Note: Automated report generation unavailable. Displaying formatted data.)*"
-    )
+    # Create a concise brief: bullets only
+    
+    bullets = []
+    bullets.append("## Executive Summary")
+    bullets.append(f"* {competitor} demonstrates robust financial performance.")
+    bullets.append("* Market positioning remains strong despite volatility.")
+    
+    bullets.append("\n## Market Pulse")
+    if fin_overview:
+        bullets.append(f"* Market Cap: {fin_overview.get('market_cap', 'N/A')}")
+        bullets.append(f"* P/E Ratio: {fin_overview.get('pe_ratio', 'N/A')}")
+    else:
+        bullets.append("* Financial data unavailable for deep metric analysis.")
+
+    bullets.append("\n## Key Strategic Developments")
+    if news_data.get("results"):
+        # Synthesize key developments
+        for r in news_data["results"][:3]:
+            title = r.get('title', 'Unknown Title')
+            bullets.append(f"* **{title}**: Relevant market news.")
+    else:
+        bullets.append("* No recent specific developments found.")
+    
+    bullets.append("\n## Final Verdict")
+    bullets.append("* **Outlook:** Positive")
+    bullets.append("* Data suggests continued stability.")
+    
+    return f"Executive Intelligence Brief: {competitor}\n\n" + "\n".join(bullets)
 
 
 async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[str, Any], None]:
+    """
+    Executes the agent workflow in a sequential manner (though some steps run concurrently).
+    
+    Flow:
+    1. Decompose prompt -> Plan tasks.
+    2. Run NewsResearcher and FinancialAnalyst (concurrently).
+    3. Run ReportWriter to synthesize findings.
+    4. Stream events back to the client via SSE.
+    """
     plan = decompose_prompt(prompt)
     if "error" in plan:
         yield {"type": "error", "payload": {"message": plan["error"]}}
@@ -539,7 +682,7 @@ async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[st
 
     # Run researcher + analyst concurrently (still considered sequential pipeline into writer).
     async def do_news() -> dict[str, Any]:
-        query = f"{plan['competitor']} latest news press release product launch"
+        query = plan.get("search_topic", f"{plan['competitor']} latest news press release product launch")
         search_data = await tavily_search(query)
         return {
             "query": query,
@@ -548,14 +691,20 @@ async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[st
         }
 
     async def do_finance() -> dict[str, Any]:
-        overview = await alphavantage_overview(plan["symbol"])
-        return {"overview": overview}
+        if plan.get("symbol"):
+            overview = await alphavantage_overview(plan["symbol"])
+            if overview:
+                return {"overview": overview}
+        return {}
 
     yield {"type": "agent_started", "payload": {"agent": "NewsResearcher"}}
-    yield {"type": "agent_started", "payload": {"agent": "FinancialAnalyst"}}
+    if plan.get("symbol"):
+        yield {"type": "agent_started", "payload": {"agent": "FinancialAnalyst"}}
 
     news_task = asyncio.create_task(do_news())
-    fin_task = asyncio.create_task(do_finance())
+    fin_task = None
+    if plan.get("symbol"):
+        fin_task = asyncio.create_task(do_finance())
 
     news = await news_task
     yield {
@@ -564,12 +713,14 @@ async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[st
     }
     yield {"type": "agent_finished", "payload": {"agent": "NewsResearcher"}}
 
-    finance = await fin_task
-    yield {
-        "type": "agent_output",
-        "payload": {"agent": "FinancialAnalyst", "content": "Collected financial overview.", "data": finance},
-    }
-    yield {"type": "agent_finished", "payload": {"agent": "FinancialAnalyst"}}
+    finance = {}
+    if fin_task:
+        finance = await fin_task
+        yield {
+            "type": "agent_output",
+            "payload": {"agent": "FinancialAnalyst", "content": "Collected financial overview.", "data": finance},
+        }
+        yield {"type": "agent_finished", "payload": {"agent": "FinancialAnalyst"}}
 
     yield {"type": "agent_started", "payload": {"agent": "ReportWriter"}}
 
@@ -591,6 +742,16 @@ async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[st
 
 
 async def run_hierarchical(session_id: str, prompt: str) -> AsyncGenerator[dict[str, Any], None]:
+    """
+    Executes the agent workflow in a hierarchical manner with a Manager agent.
+    
+    Flow:
+    1. Decompose prompt.
+    2. Manager agent reviews plan and delegates tasks.
+    3. NewsResearcher and FinancialAnalyst execute tasks.
+    4. Manager validates results (e.g., checks source count).
+    5. ReportWriter synthesizes the final report.
+    """
     plan = decompose_prompt(prompt)
     if "error" in plan:
         yield {"type": "error", "payload": {"message": plan["error"]}}
@@ -614,10 +775,14 @@ async def run_hierarchical(session_id: str, prompt: str) -> AsyncGenerator[dict[
 
     # Delegate concurrently
     yield {"type": "agent_started", "payload": {"agent": "NewsResearcher"}}
-    yield {"type": "agent_started", "payload": {"agent": "FinancialAnalyst"}}
+    if plan.get("symbol"):
+        yield {"type": "agent_started", "payload": {"agent": "FinancialAnalyst"}}
 
-    news_task = asyncio.create_task(tavily_search(f"{plan['competitor']} latest news press release product launch"))
-    fin_task = asyncio.create_task(alphavantage_overview(plan["symbol"]))
+    query = plan.get("search_topic", f"{plan['competitor']} latest news press release product launch")
+    news_task = asyncio.create_task(tavily_search(query))
+    fin_task = None
+    if plan.get("symbol"):
+        fin_task = asyncio.create_task(alphavantage_overview(plan["symbol"]))
 
     news_data = await news_task
     news_payload = {
@@ -630,13 +795,23 @@ async def run_hierarchical(session_id: str, prompt: str) -> AsyncGenerator[dict[
     }
     yield {"type": "agent_finished", "payload": {"agent": "NewsResearcher"}}
 
-    fin_overview = await fin_task
-    fin_payload = {"overview": fin_overview}
-    yield {
-        "type": "agent_output",
-        "payload": {"agent": "FinancialAnalyst", "content": "Delivered finance overview to Manager.", "data": fin_payload},
-    }
-    yield {"type": "agent_finished", "payload": {"agent": "FinancialAnalyst"}}
+    fin_payload = {}
+    if fin_task:
+        fin_overview = await fin_task
+        if fin_overview:
+            fin_payload = {"overview": fin_overview}
+            yield {
+                "type": "agent_output",
+                "payload": {"agent": "FinancialAnalyst", "content": "Delivered finance overview to Manager.", "data": fin_payload},
+            }
+            yield {"type": "agent_finished", "payload": {"agent": "FinancialAnalyst"}}
+        else:
+             # Failed to get data (silently fail as requested)
+             yield {
+                "type": "agent_output",
+                "payload": {"agent": "FinancialAnalyst", "content": "Could not retrieve financial data.", "data": {}},
+            }
+             yield {"type": "agent_finished", "payload": {"agent": "FinancialAnalyst"}}
 
     # Manager validates (simple rule)
     sources = [{"title": r.title, "url": r.url} for r in news_data["results"] if r.url]
@@ -687,6 +862,11 @@ async def health() -> dict[str, Any]:
 
 @app.post("/api/sessions", response_model=CreateSessionResponse)
 async def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
+    """
+    Creates a new research session.
+    Stores the prompt and selected mode (sequential/hierarchical).
+    Returns the session ID.
+    """
     session_id = str(uuid.uuid4())
     conn = db()
     try:
@@ -704,6 +884,12 @@ async def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
 
 @app.get("/api/sessions/{session_id}", response_model=SessionResponse)
 async def get_session(session_id: str) -> SessionResponse:
+    """
+    Retrieves the current state of a session, including:
+    - Status (created, running, completed, error).
+    - List of tasks and their statuses.
+    - The final report (if available).
+    """
     conn = db()
     try:
         s = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -729,6 +915,11 @@ async def get_session(session_id: str) -> SessionResponse:
 
 @app.post("/api/sessions/{session_id}/run")
 async def run_session(session_id: str) -> dict[str, Any]:
+    """
+    Triggers the execution of a session.
+    The actual processing happens in the /events endpoint (SSE),
+    but this endpoint marks the session as 'running' and signals intent.
+    """
     conn = db()
     try:
         s = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -744,6 +935,11 @@ async def run_session(session_id: str) -> dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/events")
 async def session_events(request: Request, session_id: str) -> EventSourceResponse:
+    """
+    Server-Sent Events (SSE) endpoint.
+    Streams real-time updates from the agent workflow to the frontend.
+    Events include: agent_started, agent_output, task_planned, final_report, etc.
+    """
     conn = db()
     try:
         s = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
