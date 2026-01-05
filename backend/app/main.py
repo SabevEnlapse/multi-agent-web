@@ -577,44 +577,16 @@ def generate_report(competitor: str, news_data: dict, finance_data: dict) -> str
             
             # Persona and Context
             system_instruction = (
-                "Role: Senior Investment Strategist & Chief Editor\n"
-                "Goal: Synthesize financial data and news into a concise, high-impact Executive Intelligence Brief.\n"
-                "Backstory: You are a veteran Wall Street analyst. You despise fluff. You prioritize 'Bottom Line Up Front' (BLUF) communication. "
-                "You connect the dots between stock movements and news headlines to provide actionable insights for decision-makers. "
-                "You ONLY communicate in bullet points.\n\n"
+                "You are a Senior Investment Strategist creating ultra-concise Executive Intelligence Briefs.\n"
+                "Be extremely brief: One sentence summary + 3-4 bullets max. Under 100 words total.\n"
+                "Focus on synthesis, avoid details. Use bullet points only."
             )
 
             # Task Description
             task_prompt = (
-                "You are the final step in the intelligence pipeline.\n"
-                "1. Take the stock data provided by the 'FinancialAnalyst'.\n"
-                "2. Take the news context provided by the 'NewsResearcher'.\n"
-                "3. Synthesize them into a strict Markdown report using ONLY bullet points. Do not use paragraphs.\n\n"
-                
-                "Your output MUST use this exact structure:\n\n"
-
-                "## Executive Summary\n"
-                "* [High-level status: Thriving/Struggling/Pivoting]\n"
-                "* [Key reason for status]\n"
-                "* [Immediate action required if any]\n\n"
-
-                "## Market Pulse\n"
-                "* [Why is the stock moving?]\n"
-                "* [Connection between news and price action]\n"
-                "* [Key financial metric context]\n\n"
-
-                "## Key Strategic Developments\n"
-                "* **[Headline]**: [Why it matters - synthesis of news and impact]\n"
-                "* **[Headline]**: [Why it matters]\n"
-                "* **[Headline]**: [Why it matters]\n\n"
-
-                "## Risk & Opportunity Assessment\n"
-                "* **Tailwind:** [Positive driver]\n"
-                "* **Headwind:** [Negative risk]\n\n"
-
-                "## Final Verdict\n"
-                "* **Outlook:** [BULLISH / BEARISH / NEUTRAL]\n"
-                "* [Justification bullet]"
+                "Create an ultra-concise Executive Intelligence Brief in under 100 words.\n"
+                "Use this structure: One summary sentence, then 3-4 short bullets for key insights.\n"
+                "Synthesize financial data and news into actionable points. No long explanations."
             )
 
             full_prompt = (
@@ -625,7 +597,12 @@ def generate_report(competitor: str, news_data: dict, finance_data: dict) -> str
             )
             
             resp = model.generate_content(full_prompt)
-            return resp.text
+            report = resp.text
+            # Ensure it's short: truncate if over 200 words
+            words = report.split()
+            if len(words) > 200:
+                report = ' '.join(words[:200]) + '...'
+            return report
         except Exception as e:
             print(f"LLM generation failed: {e}")
             # Fall through to fallback
