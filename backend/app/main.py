@@ -222,8 +222,6 @@ async def tavily_search(query: str) -> dict[str, Any]:
         "api_key": TAVILY_API_KEY,
         "query": query,
         "search_depth": "basic",
-        "topic": "news",
-        "days": 3,
         "include_answer": False,
         "include_raw_content": False,
         "include_images": True,
@@ -496,13 +494,8 @@ def decompose_prompt(prompt: str) -> dict[str, Any]:
         if not competitor:
             competitor = "General Topic"
 
-    # Use search_topic if found by LLM, otherwise default
-    if not search_topic:
-        search_topic = f"{competitor} latest news press release product launch"
-    else:
-        # If the user provided a specific topic, append the competitor name to ensure context
-        if competitor.lower() not in search_topic.lower():
-            search_topic = f"{competitor} {search_topic}"
+    # Always use the user's prompt as the search topic to ensure we search for exactly what was asked
+    search_topic = prompt
 
     planned = [
         {
@@ -577,16 +570,18 @@ def generate_report(competitor: str, news_data: dict, finance_data: dict) -> str
             
             # Persona and Context
             system_instruction = (
-                "You are a Senior Investment Strategist creating ultra-concise Executive Intelligence Briefs.\n"
-                "Be extremely brief: One sentence summary + 3-4 bullets max. Under 100 words total.\n"
-                "Focus on synthesis, avoid details. Use bullet points only."
+                "You are a Senior Investment Strategist creating easy-to-understand Executive Intelligence Briefs.\n"
+                "Explain everything in simple terms for everyday investors. Avoid jargon or explain it simply.\n"
+                "Cover all key financial metrics, news impacts, and outlook clearly.\n"
+                "Be concise but comprehensive: One summary sentence + 4-5 bullets max. Under 150 words total."
             )
 
             # Task Description
             task_prompt = (
-                "Create an ultra-concise Executive Intelligence Brief in under 100 words.\n"
-                "Use this structure: One summary sentence, then 3-4 short bullets for key insights.\n"
-                "Synthesize financial data and news into actionable points. No long explanations."
+                "Create an Executive Intelligence Brief that's easy for anyone to understand.\n"
+                "Use this structure: One clear summary sentence, then 4-5 short bullets covering all important info.\n"
+                "Explain financial terms simply (e.g., Market Cap = company's total value).\n"
+                "Include key metrics, news effects, and investment advice. Keep under 150 words."
             )
 
             full_prompt = (
@@ -598,44 +593,43 @@ def generate_report(competitor: str, news_data: dict, finance_data: dict) -> str
             
             resp = model.generate_content(full_prompt)
             report = resp.text
-            # Ensure it's short: truncate if over 200 words
+            # Ensure it's reasonable length: truncate if over 250 words
             words = report.split()
-            if len(words) > 200:
-                report = ' '.join(words[:200]) + '...'
+            if len(words) > 250:
+                report = ' '.join(words[:250]) + '...'
             return report
         except Exception as e:
             print(f"LLM generation failed: {e}")
             # Fall through to fallback
     
     # Fallback static report
-    # Create a concise brief: bullets only
+    # Create a simple, explanatory brief for easy understanding
+    
+    main_sentence = f"{competitor} is doing well with good financials and some exciting updates."
     
     bullets = []
-    bullets.append("## Executive Summary")
-    bullets.append(f"* {competitor} demonstrates robust financial performance.")
-    bullets.append("* Market positioning remains strong despite volatility.")
-    
-    bullets.append("\n## Market Pulse")
     if fin_overview:
-        bullets.append(f"* Market Cap: {fin_overview.get('market_cap', 'N/A')}")
-        bullets.append(f"* P/E Ratio: {fin_overview.get('pe_ratio', 'N/A')}")
+        market_cap = fin_overview.get('market_cap', 'N/A')
+        pe_ratio = fin_overview.get('pe_ratio', 'N/A')
+        bullets.append(f"- Company Value (Market Cap): {market_cap} - This is how much the whole company is worth.")
+        bullets.append(f"- Price-to-Earnings Ratio: {pe_ratio} - This shows if the stock price is reasonable compared to profits.")
     else:
-        bullets.append("* Financial data unavailable for deep metric analysis.")
-
-    bullets.append("\n## Key Strategic Developments")
+        bullets.append("- We don't have financial details right now.")
+    
     if news_data.get("results"):
-        # Synthesize key developments
-        for r in news_data["results"][:3]:
-            title = r.get('title', 'Unknown Title')
-            bullets.append(f"* **{title}**: Relevant market news.")
+        bullets.append("- Recent News: There are updates about new products and company changes that could help growth.")
     else:
-        bullets.append("* No recent specific developments found.")
+        bullets.append("- No big news stories at this time.")
     
-    bullets.append("\n## Final Verdict")
-    bullets.append("* **Outlook:** Positive")
-    bullets.append("* Data suggests continued stability.")
+    bullets.append("- What This Means: The company looks stable and has good potential.")
     
-    return f"Executive Intelligence Brief: {competitor}\n\n" + "\n".join(bullets)
+    bullet_text = "\n".join(bullets)
+    
+    return (
+        f"Executive Intelligence Brief: {competitor}\n\n"
+        f"{main_sentence}\n\n"
+        f"{bullet_text}"
+    )
 
 
 async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[str, Any], None]:
@@ -659,7 +653,7 @@ async def run_sequential(session_id: str, prompt: str) -> AsyncGenerator[dict[st
 
     # Run researcher + analyst concurrently (still considered sequential pipeline into writer).
     async def do_news() -> dict[str, Any]:
-        query = plan.get("search_topic", f"{plan['competitor']} latest news press release product launch")
+        query = plan.get("search_topic", plan['competitor'])
         search_data = await tavily_search(query)
         return {
             "query": query,
@@ -755,7 +749,7 @@ async def run_hierarchical(session_id: str, prompt: str) -> AsyncGenerator[dict[
     if plan.get("symbol"):
         yield {"type": "agent_started", "payload": {"agent": "FinancialAnalyst"}}
 
-    query = plan.get("search_topic", f"{plan['competitor']} latest news press release product launch")
+    query = plan.get("search_topic", plan['competitor'])
     news_task = asyncio.create_task(tavily_search(query))
     fin_task = None
     if plan.get("symbol"):
